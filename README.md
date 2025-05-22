@@ -74,8 +74,8 @@ Contributions are welcome! Please fork the repository and submit a pull request.
 
 ## License
 
-This project is open source. Please add a `LICENSE` file to specify the license for your repository.
+This project is open source. This project is licensed under the [MIT License](LICENSE).
 
 ## Contact
 
-For questions or collaborations, please contact [Srijan142003](https://github.com/Srijan142003).
+For questions or collaborations, don't hesitate to contact [Srijan142003](https://github.com/Srijan142003).
