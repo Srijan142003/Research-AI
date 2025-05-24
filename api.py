@@ -5,29 +5,82 @@ from research_analyzer import (
     analyze_with_gemini,
     extract_limitations_scope,
     generate_new_ideas,
-    elaborate_idea  # You may need to add this function if not present
+    elaborate_idea,
+    process_papers
 )
+import base64
+import re
+import io
+import sys
+import os
+import random
+import requests
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+CORS(app)
+
+HF_API_KEY = os.environ.get("HF_API_KEY", "")
+if not HF_API_KEY:
+    print("ERROR: HF_API_KEY is not set. Please check your .env file.")
+
+# --- Hugging Face image generation logic (from your app.py) ---
+def extract_base64_from_error(error_msg):
+    match = re.search(r'([A-Za-z0-9+/=]{100,})', error_msg)
+    return match.group(1) if match else None
+
+def generate_image_with_huggingface(prompt):
+    HF_API_KEY = os.environ.get("HF_API_KEY", "")
+    if not HF_API_KEY:
+        print("ERROR: HF_API_KEY is not set. Please check your .env file.")
+        return None, "HF_API_KEY not set"
+    api_url = "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0"
+    headers = {
+        "Authorization": f"Bearer {HF_API_KEY}",
+        "Accept": "application/json"
+    }
+    payload = {"inputs": prompt}
+    try:
+        resp = requests.post(api_url, headers=headers, json=payload, timeout=60)
+        content_type = resp.headers.get("content-type", "")
+        if resp.status_code == 200 and content_type.startswith("image/"):
+            return base64.b64encode(resp.content).decode("utf-8"), None
+        elif resp.status_code == 200 and content_type.startswith("application/json"):
+            try:
+                result = resp.json()
+                base64_img = extract_base64_from_error(str(result))
+                if base64_img:
+                    return base64_img, None
+                return None, result.get("error", str(result))
+            except Exception:
+                return None, f"Unknown error (could not parse JSON): {resp.text[:500]}"
+        elif resp.status_code == 503:
+            return None, "Model is loading. Please wait and try again."
+        elif resp.status_code == 404:
+            return None, "Model not found. Please check the model name or use a different model."
+        else:
+            try:
+                result = resp.json()
+                base64_img = extract_base64_from_error(str(result))
+                if base64_img:
+                    return base64_img, None
+                return None, result.get("error", resp.text)
+            except Exception:
+                base64_img = extract_base64_from_error(resp.text)
+                if base64_img:
+                    return base64_img, None
+                return None, resp.text
+    except Exception as e:
+        return None, f"Image generation error: {e}"
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
     data = request.get_json()
-    # Extract and validate fields
     topic = data.get("topic", "")
     num_papers = int(data.get("num_papers", 10))
     num_ideas = int(data.get("num_ideas", 10))
     word_limit = int(data.get("word_limit", 250))
     sort = data.get("sort", "relevance")
     analysis_prompt = data.get("analysis_prompt", "")
-
-    # --- Refactor process_papers to return a string result instead of printing ---
-    # If your process_papers currently prints to terminal, you need to capture its output.
-    # Example: Use io.StringIO to capture print output.
-    import io
-    import sys
-
     output = io.StringIO()
     sys_stdout = sys.stdout
     sys.stdout = output
@@ -44,8 +97,6 @@ def analyze():
         sys.stdout = sys_stdout
     printed_output = output.getvalue()
     output.close()
-
-    # Prefer returning printed_output if process_papers prints, else return result
     return jsonify({"result": printed_output if printed_output.strip() else result})
 
 @app.route("/analyze_papers", methods=["POST"])
@@ -93,7 +144,6 @@ def generate_ideas():
     num_ideas = int(data.get("num_ideas", 3))
     word_limit = int(data.get("word_limit", 150))
     ideas_text = generate_new_ideas(limitations, topic, num_ideas=num_ideas, word_limit=word_limit)
-    # Split ideas as numbered list or bullet points
     import re
     ideas = []
     numbered = re.findall(r"\d+\.\s(.+?)(?=\n\d+\.|\n*$)", ideas_text, re.DOTALL)
@@ -107,42 +157,45 @@ def generate_ideas():
     return jsonify({"ideas": ideas})
 
 @app.route("/elaborate", methods=["POST"])
+@app.route("/api/elaborate", methods=["POST"])
 def elaborate():
     data = request.get_json()
     topic = data.get("topic", "")
     idea_text = data.get("idea_text", "")
     word_limit = int(data.get("word_limit", 500))
-    # Use the same elaborate_idea logic as before, or define it here
-    if hasattr(elaborate_idea, "__call__"):
+    # If topic is empty (as in Hot & Fresh), use idea_text as prompt for image
+    try:
         result = elaborate_idea(idea_text, topic, word_limit=word_limit)
-    else:
-        # fallback: simple Gemini call
-        from research_analyzer import genai
-        prompt = (
-            f"You are an expert research assistant. Please elaborate in detail (up to {word_limit} words) on the following research idea related to '{topic}'. "
-            "Discuss its significance, possible methodology, expected challenges, and potential impact. Be thorough and insightful.\n\n"
-            f"Idea:\n{idea_text}"
-        )
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        response = model.generate_content(prompt)
-        result = response.text if hasattr(response, "text") else str(response)
-    return jsonify({"result": result})
+        # Use a more robust prompt for image generation
+        if topic:
+            prompt = f"An illustration of the following research idea: {idea_text} (Topic: {topic})"
+        else:
+            prompt = f"An illustration of the following research idea: {idea_text}"
+        img_b64, img_error = generate_image_with_huggingface(prompt)
+        image = f"data:image/png;base64,{img_b64}" if img_b64 else ""
+        if not image and img_error:
+            print(f"Image generation error: {img_error}")
+        return jsonify({
+            "result": result,
+            "image": image,
+            "image_error": img_error if not image else None
+        })
+    except Exception as e:
+        print("Elaboration error:", e)
+        return jsonify({
+            "result": f"AI elaboration unavailable. (Exception: {e})",
+            "image": "",
+            "image_error": str(e)
+        })
 
 @app.route("/random_ideas", methods=["POST"])
 @app.route("/api/random_ideas", methods=["POST"])
 def random_ideas():
-    """
-    Returns a list of fresh AI-generated research ideas based on trending papers.
-    Requires GEMINI_API_KEY and CORE_API_KEY as environment variables.
-    """
     data = request.get_json(force=True)
     count = int(data.get("count", 5))
-
-    # --- Fetch trending papers from CORE API ---
     import os
     import random
     import requests
-
     GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
     CORE_API_KEY = os.environ.get("CORE_API_KEY", "")
 
@@ -199,7 +252,6 @@ def random_ideas():
                     ideas.append(line[2:].strip())
                 elif line and not line.lower().startswith("paper"):
                     ideas.append(line.strip("-•*1234567890. ").strip())
-            # Remove empty and duplicate ideas
             ideas = [i for i in ideas if i]
             seen = set()
             unique_ideas = []
@@ -214,6 +266,7 @@ def random_ideas():
 
     papers = fetch_trending_papers_from_core(limit=5)
     ideas = []
+    images = []
     if GEMINI_API_KEY and papers:
         ideas = generate_gaps_with_gemini(papers, count)
     if not ideas:
@@ -225,7 +278,19 @@ def random_ideas():
             "Energy-efficient deep learning for edge devices"
         ]
         ideas = random.sample(fallback_ideas, min(count, len(fallback_ideas)))
-    return jsonify({"ideas": ideas})
+
+    # --- Generate images for each idea using Hugging Face ---
+    for idea in ideas:
+        prompt = f"An illustration of the following research idea: {idea}"
+        img_b64, img_error = generate_image_with_huggingface(prompt)
+        image = f"data:image/png;base64,{img_b64}" if img_b64 else ""
+        images.append({
+            "image": image,
+            "image_error": img_error if not image else None
+        })
+
+    # Return both ideas and their images (frontend must be updated to use this)
+    return jsonify({"ideas": ideas, "images": images})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
