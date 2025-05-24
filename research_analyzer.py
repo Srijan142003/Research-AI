@@ -129,19 +129,6 @@ def generate_new_ideas(limitations_text: str, topic: str, num_ideas: int = 10, w
             return str(response)
     except Exception as e:
         return f"Error generating new ideas: {e}"
-def get_user_choice(prompt: str, choices: list[int]) -> int:
-    """Prompt user to select a number from a list of choices"""
-    while True:
-        val = input(f"{prompt} {choices}: ").strip()
-        try:
-            num = int(val)
-            if num in choices:
-                return num
-            else:
-                print(f"Please enter a valid number from {choices}")
-        except ValueError:
-            print("Invalid input. Please enter a valid integer.")
-
 def elaborate_idea(idea_text: str, topic: str, word_limit: int = 1000) -> str:
     """
     Use Gemini to elaborate more deeply on a selected research idea.
@@ -160,6 +147,18 @@ def elaborate_idea(idea_text: str, topic: str, word_limit: int = 1000) -> str:
             return str(response)
     except Exception as e:
         return f"Error elaborating idea: {e}"
+
+# Example usage for CLI or integration:
+def display_idea_with_image(idea_text: str, topic: str, word_limit: int = 1000):
+    """
+    Elaborate an idea and display the AI-generated image (prints image URL or base64).
+    """
+    result = elaborate_idea(idea_text, topic, word_limit)
+    print("\nElaboration:\n")
+    print(result["elaboration"])
+    print("\nAI-Generated Image (URL or base64):\n")
+    print(result["image"])
+
 def process_papers(
     query: str,
     analysis_prompt: str,
