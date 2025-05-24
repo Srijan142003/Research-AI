@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 import random
 import requests
 import os
+import base64
 
 app = Flask(__name__)
 
@@ -127,7 +128,6 @@ def analyze_paper_with_gemini(title, abstract):
     try:
         response = model.generate_content(prompt)
         text = response.text
-        # Extract analysis and limitations/scope
         analysis = ""
         lim_scope = ""
         for line in text.split("\n"):
@@ -145,13 +145,10 @@ def analyze_paper_with_gemini(title, abstract):
 def random_ideas():
     data = request.get_json(force=True)
     count = int(data.get("count", 5))
-    # Step 1: Fetch trending papers from CORE
     papers = fetch_trending_papers_from_core(limit=5)
-    # Step 2: Use Gemini to generate new gaps/ideas
     ideas = []
     if GEMINI_API_KEY and papers:
         ideas = generate_gaps_with_gemini(papers, count)
-    # Step 3: Fallback if Gemini or CORE fails
     if not ideas:
         fallback_ideas = [
             "Explainable AI for medical imaging diagnosis",
@@ -211,6 +208,56 @@ def generate_ideas():
         print("Gemini API error:", e)
         return jsonify({"ideas": []})
 
+# --- Hugging Face image generation logic (copied from api.py) ---
+def extract_base64_from_error(error_msg):
+    import re
+    match = re.search(r'([A-Za-z0-9+/=]{100,})', error_msg)
+    return match.group(1) if match else None
+
+def generate_image_with_huggingface(prompt):
+    HF_API_KEY = os.environ.get("HF_API_KEY", "")
+    if not HF_API_KEY:
+        print("ERROR: HF_API_KEY is not set. Please check your .env file.")
+        return None, "HF_API_KEY not set"
+    api_url = "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0"
+    headers = {
+        "Authorization": f"Bearer {HF_API_KEY}",
+        "Accept": "application/json"
+    }
+    payload = {"inputs": prompt}
+    try:
+        resp = requests.post(api_url, headers=headers, json=payload, timeout=60)
+        content_type = resp.headers.get("content-type", "")
+        if resp.status_code == 200 and content_type.startswith("image/"):
+            return base64.b64encode(resp.content).decode("utf-8"), None
+        elif resp.status_code == 200 and content_type.startswith("application/json"):
+            try:
+                result = resp.json()
+                base64_img = extract_base64_from_error(str(result))
+                if base64_img:
+                    return base64_img, None
+                return None, result.get("error", str(result))
+            except Exception:
+                return None, f"Unknown error (could not parse JSON): {resp.text[:500]}"
+        elif resp.status_code == 503:
+            return None, "Model is loading. Please wait and try again."
+        elif resp.status_code == 404:
+            return None, "Model not found. Please check the model name or use a different model."
+        else:
+            try:
+                result = resp.json()
+                base64_img = extract_base64_from_error(str(result))
+                if base64_img:
+                    return base64_img, None
+                return None, result.get("error", resp.text)
+            except Exception:
+                base64_img = extract_base64_from_error(resp.text)
+                if base64_img:
+                    return base64_img, None
+                return None, resp.text
+    except Exception as e:
+        return None, f"Image generation error: {e}"
+
 @app.route("/api/elaborate", methods=["POST"])
 @app.route("/elaborate", methods=["POST"])
 def elaborate():
@@ -219,7 +266,7 @@ def elaborate():
     idea_text = data.get("idea_text", "")
     word_limit = int(data.get("word_limit", 500))
     if not GEMINI_API_KEY:
-        return jsonify({"result": "AI elaboration unavailable."})
+        return jsonify({"result": "AI elaboration unavailable.", "image": "", "image_error": "Gemini API key not set"})
     import google.generativeai as genai
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel("gemini-pro")
@@ -230,10 +277,32 @@ def elaborate():
     )
     try:
         response = model.generate_content(prompt)
-        return jsonify({"result": response.text})
+        result_text = response.text
+        # --- Generate image using Hugging Face ---
+        # Always print the prompt and Hugging Face response for debugging
+        if topic:
+            img_prompt = f"An illustration of the following research idea: {idea_text} (Topic: {topic})"
+        else:
+            img_prompt = f"An illustration of the following research idea: {idea_text}"
+        print("Hot & Fresh Elaboration - Image prompt:", img_prompt)
+        img_b64, img_error = generate_image_with_huggingface(img_prompt)
+        print("Hot & Fresh Elaboration - Image base64 length:", len(img_b64) if img_b64 else 0)
+        print("Hot & Fresh Elaboration - Image error:", img_error)
+        if img_b64:
+            print("Hot & Fresh Elaboration - Image base64 (first 100 chars):", img_b64[:100])
+        image = f"data:image/png;base64,{img_b64}" if img_b64 else ""
+        return jsonify({
+            "result": result_text,
+            "image": image,
+            "image_error": img_error if not image else None
+        })
     except Exception as e:
         print("Gemini API error:", e)
-        return jsonify({"result": "AI elaboration unavailable."})
+        return jsonify({
+            "result": "AI elaboration unavailable.",
+            "image": "",
+            "image_error": str(e)
+        })
 
 if __name__ == "__main__":
     app.run(port=8000, debug=True)
